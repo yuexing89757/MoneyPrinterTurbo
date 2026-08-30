@@ -51,6 +51,35 @@ class TaskManager:
                 )
                 self.enqueue({"func": func, "args": args, "kwargs": kwargs})
 
+    def add_tasks(self, tasks: list[Dict[str, Any]]):
+        """Atomically admit an ordered batch to the bounded queue."""
+        normalized = []
+        for task in tasks:
+            func = task.get("func")
+            if not callable(func):
+                raise TypeError("batch task func must be callable")
+            normalized.append(
+                {
+                    "func": func,
+                    "args": tuple(task.get("args", ())),
+                    "kwargs": dict(task.get("kwargs", {})),
+                }
+            )
+
+        with self.lock:
+            queue_size = self.queue_size()
+            if queue_size + len(normalized) > self.max_queued_tasks:
+                logger.warning(
+                    f"reject task batch: batch_size: {len(normalized)}, "
+                    f"queue_size: {queue_size}, "
+                    f"max_queued_tasks: {self.max_queued_tasks}"
+                )
+                raise TaskQueueFullError("task queue is full, please try again later")
+            for task in normalized:
+                self.enqueue(task)
+
+        self.check_queue()
+
     def execute_task(self, func: Callable, *args: Any, **kwargs: Any):
         thread = threading.Thread(
             target=self.run_task, args=(func, *args), kwargs=kwargs

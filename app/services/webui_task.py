@@ -169,3 +169,43 @@ def submit_generation(
             f"failed to submit WebUI generation task, task_id={task_id}, error={exc}"
         )
         raise
+
+
+def submit_generations(
+    entries: list[tuple[str, VideoParams]],
+    capture_logs: bool = True,
+) -> None:
+    """Register and atomically enqueue an ordered batch of WebUI tasks."""
+    prepared = [
+        (task_id, params.model_copy(deep=True)) for task_id, params in entries
+    ]
+    for task_id, params in prepared:
+        sm.state.update_task(
+            task_id,
+            state=const.TASK_STATE_PROCESSING,
+            progress=0,
+            video_subject=params.video_subject or params.video_script or task_id,
+        )
+
+    tasks = [
+        {
+            "func": _run_generation,
+            "args": (),
+            "kwargs": {
+                "task_id": task_id,
+                "params": params,
+                "capture_logs": capture_logs,
+                "voice_preview": None,
+                "loomloom_video_request": None,
+            },
+        }
+        for task_id, params in prepared
+    ]
+    try:
+        _task_manager.add_tasks(tasks)
+    except Exception:
+        delete_task = getattr(sm.state, "delete_task", None)
+        if callable(delete_task):
+            for task_id, _ in prepared:
+                delete_task(task_id)
+        raise

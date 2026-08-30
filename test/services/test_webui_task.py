@@ -301,6 +301,49 @@ def test_submit_generation_copies_params_before_starting_worker():
     webui_task.sm.state.delete_task("copied-params-test")
 
 
+def test_submit_generations_registers_all_states_and_enqueues_once():
+    """批量入口应深拷贝参数、登记所有状态，再执行一次原子入队。"""
+    entries = [
+        ("batch-task-a", VideoParams(video_subject="自律")),
+        ("batch-task-b", VideoParams(video_subject="复利")),
+    ]
+    try:
+        with patch.object(webui_task._task_manager, "add_tasks") as add_tasks:
+            webui_task.submit_generations(entries, capture_logs=False)
+
+        assert add_tasks.call_count == 1
+        queued = add_tasks.call_args.args[0]
+        assert [task["kwargs"]["task_id"] for task in queued] == [
+            "batch-task-a",
+            "batch-task-b",
+        ]
+        assert queued[0]["kwargs"]["params"] == entries[0][1]
+        assert queued[0]["kwargs"]["params"] is not entries[0][1]
+        assert webui_task.sm.state.get_task("batch-task-a")["video_subject"] == "自律"
+        assert webui_task.sm.state.get_task("batch-task-b")["video_subject"] == "复利"
+    finally:
+        webui_task.sm.state.delete_task("batch-task-a")
+        webui_task.sm.state.delete_task("batch-task-b")
+
+
+def test_submit_generations_removes_provisional_states_when_admission_fails():
+    """原子入队失败时不应留下永久显示为运行中的批次状态。"""
+    entries = [
+        ("rejected-task-a", VideoParams(video_subject="自律")),
+        ("rejected-task-b", VideoParams(video_subject="复利")),
+    ]
+    with patch.object(
+        webui_task._task_manager,
+        "add_tasks",
+        side_effect=ValueError("queue full"),
+    ):
+        with pytest.raises(ValueError, match="queue full"):
+            webui_task.submit_generations(entries, capture_logs=False)
+
+    assert webui_task.sm.state.get_task("rejected-task-a") is None
+    assert webui_task.sm.state.get_task("rejected-task-b") is None
+
+
 def test_scheduling_failure_is_saved_as_terminal_task_state():
     """队列或线程启动失败时不能让任务管理器永久停留在“生成中”。"""
     task_id = "scheduling-failure-test"

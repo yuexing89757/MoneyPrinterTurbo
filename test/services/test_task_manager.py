@@ -11,6 +11,33 @@ from app.services import task as task_service
 
 
 class TestInMemoryTaskManager(unittest.TestCase):
+    def test_add_tasks_rejects_whole_batch_when_capacity_is_insufficient(self):
+        """批量容量不足时不能只入队前半批任务。"""
+        manager = InMemoryTaskManager(max_concurrent_tasks=0, max_queued_tasks=2)
+
+        with self.assertRaises(TaskQueueFullError):
+            manager.add_tasks(
+                [
+                    {"func": len, "args": ([1],), "kwargs": {}},
+                    {"func": len, "args": ([2],), "kwargs": {}},
+                    {"func": len, "args": ([3],), "kwargs": {}},
+                ]
+            )
+
+        self.assertEqual(manager.queue_size(), 0)
+
+    def test_add_tasks_preserves_batch_order(self):
+        """整批进入有界队列后必须保持用户输入顺序。"""
+        manager = InMemoryTaskManager(max_concurrent_tasks=0, max_queued_tasks=3)
+        tasks = [
+            {"func": len, "args": ([value],), "kwargs": {}}
+            for value in (1, 2, 3)
+        ]
+
+        manager.add_tasks(tasks)
+
+        self.assertEqual([manager.dequeue() for _ in range(3)], tasks)
+
     def test_queue_operations_preserve_task_payload(self):
         """内存队列应保持函数、位置参数和关键字参数，不得改变任务内容。"""
         manager = InMemoryTaskManager(max_concurrent_tasks=1, max_queued_tasks=2)
