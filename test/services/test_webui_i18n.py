@@ -10,6 +10,7 @@ from app.utils import utils
 
 ROOT_DIR = Path(__file__).parent.parent.parent
 WEBUI_MAIN = ROOT_DIR / "webui" / "Main.py"
+WEBUI_BATCH_PAGE = ROOT_DIR / "webui" / "batch_page.py"
 I18N_DIR = ROOT_DIR / "webui" / "i18n"
 LLM_PROVIDER_TIPS_PREFIX = "llm_provider_tips."
 TTS_PROVIDER_TIPS_PREFIX = "tts_provider_tips."
@@ -22,6 +23,37 @@ PROVIDER_TIPS_PREFIXES = (
 # 避免把完全相同的品牌名复制十份，也避免长说明后续只更新部分语言。
 ENGLISH_FALLBACK_KEYS = frozenset(
     {
+        "Generation Mode",
+        "Single Generation",
+        "Batch Generation",
+        "Batch Keywords",
+        "Batch Keywords Placeholder",
+        "Batch Keyword Count",
+        "Video Script Prompt",
+        "Start Batch Generation",
+        "Batch Submitted",
+        "Batch Video Source Unsupported",
+        "Batch Video Source Key Required",
+        "FFmpeg Is Not Available",
+        "Batch History",
+        "Batch Status Filter",
+        "No Batch History",
+        "Batch Record Load Warning",
+        "Batch Script Summary",
+        "Retry",
+        "Batch Status Waiting",
+        "Batch Status Script",
+        "Batch Status Audio",
+        "Batch Status Materials",
+        "Batch Status Video",
+        "Batch Status Complete",
+        "Batch Status Failed",
+        "Batch Status Interrupted",
+        "Batch Filter All",
+        "Batch Filter Processing",
+        "Batch Filter Complete",
+        "Batch Filter Failed",
+        "Batch Filter Interrupted",
         "AI Video Quote Required",
         "AI Video Quote Retained For Retry",
         "AI Video Quote Summary",
@@ -135,9 +167,9 @@ class TestWebuiI18n(unittest.TestCase):
         self.assertEqual(language, "en")
 
     def test_english_locale_covers_static_webui_labels(self):
-        tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
         visitor = _TrKeyVisitor()
-        visitor.visit(tree)
+        for path in (WEBUI_MAIN, WEBUI_BATCH_PAGE):
+            visitor.visit(ast.parse(path.read_text(encoding="utf-8")))
 
         en_keys = set(_load_translation("en"))
 
@@ -188,9 +220,9 @@ class TestWebuiI18n(unittest.TestCase):
                 self.assertEqual(sorted(ENGLISH_FALLBACK_KEYS & locale_keys), [])
 
     def test_secondary_locales_cover_static_webui_labels(self):
-        tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
         visitor = _TrKeyVisitor()
-        visitor.visit(tree)
+        for path in (WEBUI_MAIN, WEBUI_BATCH_PAGE):
+            visitor.visit(ast.parse(path.read_text(encoding="utf-8")))
 
         for locale in SECONDARY_LOCALES:
             with self.subTest(locale=locale):
