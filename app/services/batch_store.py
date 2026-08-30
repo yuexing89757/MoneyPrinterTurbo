@@ -84,6 +84,7 @@ class BatchStore:
             "video_aspect": values.get("video_aspect"),
             "voice_name": values.get("voice_name"),
             "video_count": values.get("video_count"),
+            "requires_custom_audio": bool(params.custom_audio_file),
         }
 
     def create(self, keywords: list[str], params: VideoParams) -> BatchRecord:

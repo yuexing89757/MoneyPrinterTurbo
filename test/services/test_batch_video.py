@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -228,3 +229,24 @@ def test_list_batch_views_marks_old_owner_as_interrupted(tmp_path):
 
     assert warnings == []
     assert batches[0].items[0].status == "interrupted"
+
+
+def test_coordinator_copies_uploaded_narration_into_each_task(tmp_path):
+    narration = tmp_path / "voice.wav"
+    narration.write_bytes(b"shared narration")
+    submitted = []
+    coordinator = BatchCoordinator(
+        store=BatchStore(tmp_path / "batches"),
+        tasks_root=tmp_path / "tasks",
+        state=MemoryState(),
+        submitter=lambda entries, capture_logs=True: submitted.extend(entries),
+        process_owner="owner-a",
+    )
+    params = VideoParams(video_subject="", custom_audio_file=str(narration))
+
+    coordinator.create_and_submit("自律\n复利", params)
+
+    task_audio_paths = [Path(value.custom_audio_file) for _, value in submitted]
+    assert len(set(task_audio_paths)) == 2
+    assert all(path.read_bytes() == b"shared narration" for path in task_audio_paths)
+    assert all(path.parent.parent == (tmp_path / "tasks").resolve() for path in task_audio_paths)

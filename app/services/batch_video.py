@@ -1,4 +1,5 @@
 import json
+import shutil
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import Enum
@@ -249,6 +250,7 @@ class BatchCoordinator:
         keywords = parse_keywords(raw_keywords)
         record = self.store.create(keywords, base_params)
         entries: list[tuple[str, VideoParams]] = []
+        created_task_dirs: list[Path] = []
         now = datetime.now(timezone.utc)
         for item in record.items:
             task_id = str(uuid4())
@@ -259,13 +261,36 @@ class BatchCoordinator:
                     process_owner=self.process_owner,
                 )
             )
-            entries.append((task_id, self._task_params(base_params, item.keyword)))
+            params = self._task_params(base_params, item.keyword)
+            if base_params.custom_audio_file:
+                source = Path(base_params.custom_audio_file).resolve()
+                if not source.is_file():
+                    raise BatchUploadRequiredError("custom narration file is unavailable")
+                if source.suffix.lower() not in {
+                    ".mp3",
+                    ".wav",
+                    ".m4a",
+                    ".aac",
+                    ".flac",
+                    ".ogg",
+                }:
+                    raise BatchUploadRequiredError("custom narration file type is unsupported")
+                task_dir = _safe_task_dir(self.tasks_root, task_id)
+                task_dir.mkdir(parents=True, exist_ok=False)
+                created_task_dirs.append(task_dir)
+                target = task_dir / f"custom-audio{source.suffix.lower()}"
+                shutil.copyfile(source, target)
+                params.custom_audio_file = str(target)
+            entries.append((task_id, params))
         record.updated_at = now
         self.store.save(record)
         try:
             self.submitter(entries, capture_logs=capture_logs)
         except Exception:
             self.store.delete(record.batch_id)
+            for task_dir in created_task_dirs:
+                if task_dir.parent == self.tasks_root.resolve():
+                    shutil.rmtree(task_dir, ignore_errors=True)
             raise
         return record
 

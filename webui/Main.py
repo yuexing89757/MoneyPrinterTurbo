@@ -57,8 +57,10 @@ from app.services import sonilo as sonilo_service
 from app.services import state as sm
 from app.services import task as tm
 from app.services import version_checker
+from app.services.batch_video import BatchCoordinator, parse_keywords
 from app.utils.logging_utils import configure_terminal_logger
 from app.utils import utils
+from webui import batch_page
 
 st.set_page_config(
     page_title="MoneyPrinterTurbo",
@@ -6040,12 +6042,198 @@ def _render_generation_controls(
     return start_button
 
 
+@st.cache_resource
+def _batch_coordinator():
+    return BatchCoordinator()
+
+
+def _batch_validation_error(params, uploaded_files, uploaded_audio_file, voice_mode):
+    valid_sources = {
+        "pexels",
+        "pixabay",
+        "coverr",
+        "wavespeed",
+        "volcengine_seedance",
+        "local",
+    }
+    if params.video_source not in valid_sources:
+        return tr("Batch Video Source Unsupported")
+    required_keys = {
+        "pexels": "pexels_api_keys",
+        "pixabay": "pixabay_api_keys",
+        "coverr": "coverr_api_keys",
+        "wavespeed": "wavespeed_api_keys",
+    }
+    key_name = required_keys.get(params.video_source)
+    if key_name and not config.app.get(key_name, ""):
+        return tr("Batch Video Source Key Required")
+    if params.video_source == "wavespeed" and not st.session_state.get(
+        "wavespeed_confirm_charge", False
+    ):
+        return tr("Confirm WaveSpeed Charge Required")
+    if params.video_source == "volcengine_seedance":
+        if not volcengine_seedance.is_enabled(
+            config.snapshot_config_with_pending(config.app)
+        ):
+            return tr("Please Enter the Volcano Engine Ark API Key")
+        if not st.session_state.get("volcengine_seedance_confirm_charge", False):
+            return tr("Confirm Volcano Engine Seedance Charge Required")
+    if (
+        params.video_source == "local"
+        and not uploaded_files
+        and not st.session_state.get("local_video_materials")
+    ):
+        return tr("Please Upload Local Materials First")
+    if voice_mode == VOICE_MODE_UPLOAD and uploaded_audio_file is None:
+        return tr("Please Upload Voiceover File First")
+    if not utils.check_ffmpeg_ready():
+        return tr("FFmpeg Is Not Available")
+    return ""
+
+
+def _prepare_batch_local_materials(params, uploaded_files):
+    if uploaded_files:
+        local_videos_dir = utils.storage_dir("local_videos", create=True)
+        materials = []
+        persisted = []
+        for file in uploaded_files:
+            path = _build_uploaded_file_path(
+                file,
+                local_videos_dir,
+                LOCAL_MATERIAL_EXTENSIONS,
+                "material",
+            )
+            with open(path, "wb") as output:
+                output.write(file.getbuffer())
+            material = MaterialInfo(provider="local", url=path)
+            materials.append(material)
+            persisted.append(
+                {"provider": "local", "url": path, "duration": material.duration}
+            )
+        st.session_state["local_video_materials"] = persisted
+        params.video_materials = materials
+    elif params.video_source == "local":
+        params.video_materials = [
+            MaterialInfo(
+                provider=value.get("provider", "local"),
+                url=value.get("url", ""),
+                duration=value.get("duration", 0),
+            )
+            for value in st.session_state.get("local_video_materials", [])
+            if value.get("url")
+        ]
+
+
+def _prepare_batch_custom_audio(params, uploaded_audio_file):
+    if uploaded_audio_file is None:
+        return ""
+    upload_dir = utils.storage_dir("batch_uploads", create=True)
+    path = _build_uploaded_file_path(
+        uploaded_audio_file,
+        upload_dir,
+        CUSTOM_AUDIO_EXTENSIONS,
+        f"batch-audio-{uuid4().hex}",
+    )
+    with open(path, "wb") as output:
+        output.write(uploaded_audio_file.getbuffer())
+    params.custom_audio_file = path
+    return path
+
+
+def _render_batch_application():
+    st.subheader(tr("Batch Generation"))
+    with st.container(key="batch_settings_grid"):
+        panel = st.columns(4)
+    params = VideoParams(video_subject="")
+    raw_keywords = batch_page.render_keyword_input(tr)
+    params.video_script_prompt = panel[0].text_area(
+        tr("Video Script Prompt"),
+        value=st.session_state.get("video_script_prompt", ""),
+        max_chars=llm.MAX_SCRIPT_PROMPT_LENGTH,
+        key="batch_video_script_prompt",
+    )
+    params.custom_system_prompt = st.session_state.get(
+        "custom_system_prompt", llm.DEFAULT_SCRIPT_SYSTEM_PROMPT
+    )
+    params.video_language = "zh-CN"
+    params.paragraph_number = 1
+    uploaded_files = _render_video_settings(panel[1], params)
+    uploaded_audio_file, uploaded_bgm_file, voice_mode = _render_audio_settings(
+        panel[2], params
+    )
+    _render_subtitle_settings(panel[3], params)
+
+    if st.button(
+        tr("Start Batch Generation"),
+        type="primary",
+        use_container_width=True,
+        key="start_batch_generation",
+    ):
+        temporary_audio = ""
+        try:
+            keywords = parse_keywords(raw_keywords)
+            error = _batch_validation_error(
+                params, uploaded_files, uploaded_audio_file, voice_mode
+            )
+            if error:
+                st.error(error)
+            else:
+                _save_runtime_config()
+                _prepare_batch_local_materials(params, uploaded_files)
+                temporary_audio = _prepare_batch_custom_audio(
+                    params, uploaded_audio_file
+                )
+                if uploaded_bgm_file and bgm_service.should_use_bgm(
+                    params.bgm_type, params.bgm_volume
+                ):
+                    params.bgm_file = bgm_service.save_bgm_upload(
+                        uploaded_bgm_file.name, uploaded_bgm_file
+                    )
+                record = _batch_coordinator().create_and_submit(
+                    "\n".join(keywords),
+                    params,
+                    capture_logs=not config.ui.get("hide_log", False),
+                )
+                st.session_state["selected_batch_id"] = record.batch_id
+                st.success(tr("Batch Submitted").format(count=len(keywords)))
+        except Exception as exc:
+            logger.exception(f"failed to submit video batch: {exc}")
+            st.error(str(exc))
+        finally:
+            if temporary_audio and os.path.isfile(temporary_audio):
+                try:
+                    os.remove(temporary_audio)
+                except OSError:
+                    logger.warning(
+                        f"failed to clean temporary batch audio: {temporary_audio}"
+                    )
+
+    batch_page.render_batch_history(
+        _batch_coordinator(),
+        tr,
+        _build_video_download_name,
+    )
+
+
 def _render_application():
     """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
     _render_top_bar()
 
     if st.session_state.get("settings_dialog_open", False):
         _render_settings_dialog()
+
+    generation_mode = st.segmented_control(
+        tr("Generation Mode"),
+        options=["single", "batch"],
+        format_func=lambda value: (
+            tr("Single Generation") if value == "single" else tr("Batch Generation")
+        ),
+        key="generation_mode",
+        label_visibility="collapsed",
+    )
+    if generation_mode == "batch":
+        _render_batch_application()
+        return
 
     if _apply_pending_settings_preset():
         st.success(tr("Settings Preset Imported"))
