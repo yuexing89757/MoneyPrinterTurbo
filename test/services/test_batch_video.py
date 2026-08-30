@@ -29,6 +29,10 @@ def _record_with_attempt(tmp_path, owner="current"):
     return record, record.items[0], attempt
 
 
+def _mp4_box(box_type: bytes, payload: bytes = b"") -> bytes:
+    return (8 + len(payload)).to_bytes(4, "big") + box_type + payload
+
+
 def test_parse_keywords_ignores_blank_lines_and_preserves_duplicates():
     assert parse_keywords(" 自律 \n\n长期主义\n自律\n") == [
         "自律",
@@ -106,7 +110,7 @@ def test_existing_final_video_and_script_win_over_stale_runtime_state(tmp_path):
     task_dir = tmp_path / "tasks" / attempt.task_id
     task_dir.mkdir(parents=True)
     final_video = task_dir / "final-1.mp4"
-    final_video.write_bytes(b"video")
+    final_video.write_bytes(_mp4_box(b"ftyp") + _mp4_box(b"moov"))
     script = "这是一段已经生成的完整旁白。"
     (task_dir / "script.json").write_text(
         json.dumps({"script": script}, ensure_ascii=False), encoding="utf-8"
@@ -125,6 +129,45 @@ def test_existing_final_video_and_script_win_over_stale_runtime_state(tmp_path):
     assert view.videos == [str(final_video.resolve())]
     assert view.script_summary == script
     assert view.script_length == len(script)
+
+
+def test_stale_task_does_not_publish_an_incomplete_mp4(tmp_path):
+    record, item, attempt = _record_with_attempt(tmp_path, owner="old-process")
+    task_dir = tmp_path / "tasks" / attempt.task_id
+    task_dir.mkdir(parents=True)
+    partial_video = task_dir / "final-1.mp4"
+    partial_video.write_bytes(_mp4_box(b"ftyp") + _mp4_box(b"mdat"))
+
+    view = derive_item_view(
+        record,
+        item,
+        {"state": const.TASK_STATE_PROCESSING, "progress": 50},
+        tmp_path / "tasks",
+        "new-process",
+    )
+
+    assert view.status == "interrupted"
+    assert view.videos == []
+
+
+def test_active_task_does_not_publish_final_video_before_encoding_finishes(tmp_path):
+    record, item, attempt = _record_with_attempt(tmp_path)
+    task_dir = tmp_path / "tasks" / attempt.task_id
+    task_dir.mkdir(parents=True)
+    partial_video = task_dir / "final-1.mp4"
+    partial_video.write_bytes(b"incomplete mp4")
+
+    view = derive_item_view(
+        record,
+        item,
+        {"state": const.TASK_STATE_PROCESSING, "progress": 50},
+        tmp_path / "tasks",
+        "current",
+    )
+
+    assert view.status == "video"
+    assert view.progress == 50
+    assert view.videos == []
 
 
 def test_coordinator_creates_one_independent_task_per_keyword(tmp_path):

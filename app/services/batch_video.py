@@ -117,13 +117,46 @@ def _read_script(task_dir: Path) -> str:
     return str(payload.get("script") or "").strip()
 
 
+def _is_complete_mp4(path: Path) -> bool:
+    try:
+        file_size = path.stat().st_size
+        offset = 0
+        found_moov = False
+        with path.open("rb") as video_file:
+            while offset + 8 <= file_size:
+                video_file.seek(offset)
+                header = video_file.read(8)
+                if len(header) != 8:
+                    return False
+                box_size = int.from_bytes(header[:4], "big")
+                box_type = header[4:]
+                header_size = 8
+                if box_size == 1:
+                    extended_size = video_file.read(8)
+                    if len(extended_size) != 8:
+                        return False
+                    box_size = int.from_bytes(extended_size, "big")
+                    header_size = 16
+                elif box_size == 0:
+                    box_size = file_size - offset
+                if box_size < header_size or offset + box_size > file_size:
+                    return False
+                found_moov = found_moov or box_type == b"moov"
+                offset += box_size
+        return found_moov and offset == file_size
+    except OSError:
+        return False
+
+
 def _final_videos(task_dir: Path) -> list[str]:
     if not task_dir.is_dir():
         return []
     return [
         str(path.resolve())
         for path in sorted(task_dir.glob("final-*.mp4"))
-        if path.is_file() and path.resolve().parent == task_dir
+        if path.is_file()
+        and path.resolve().parent == task_dir
+        and _is_complete_mp4(path)
     ]
 
 
@@ -161,6 +194,14 @@ def derive_item_view(
     task_dir = _safe_task_dir(Path(tasks_root), attempt.task_id)
     videos = _final_videos(task_dir)
     script = _read_script(task_dir)
+    runtime = dict(runtime_task or {})
+    state = runtime.get("state")
+    published_videos = (
+        videos
+        if state == const.TASK_STATE_COMPLETE
+        or attempt.process_owner != current_process_owner
+        else []
+    )
     common = {
         "item_id": item.item_id,
         "task_id": attempt.task_id,
@@ -168,17 +209,15 @@ def derive_item_view(
         "keyword": item.keyword,
         "script_summary": script[:160],
         "script_length": len(script),
-        "videos": videos,
+        "videos": published_videos,
     }
-    if videos:
+    if published_videos:
         return BatchItemView(
             **common,
             status=BatchItemStatus.complete,
             progress=100,
         )
 
-    runtime = dict(runtime_task or {})
-    state = runtime.get("state")
     progress = max(0, min(100, int(runtime.get("progress", 0) or 0)))
     if state == const.TASK_STATE_FAILED:
         return BatchItemView(
