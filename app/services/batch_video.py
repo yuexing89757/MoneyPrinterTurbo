@@ -1,20 +1,30 @@
 import json
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any
-from uuid import UUID
+from typing import Any, Callable
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
 from app.models import const
+from app.models.schema import VideoParams
 from app.services import llm
-from app.services.batch_store import BatchItem, BatchRecord
+from app.services.batch_store import (
+    BatchAttempt,
+    BatchItem,
+    BatchLoadWarning,
+    BatchRecord,
+    BatchStore,
+)
+from app.utils import utils
 
 
 MAX_BATCH_KEYWORDS = 100
 MAX_KEYWORD_LENGTH = 500
 MAX_SCRIPT_FILE_BYTES = 1024 * 1024
+BATCH_PROCESS_OWNER = str(uuid4())
 
 
 def parse_keywords(raw: str) -> list[str]:
@@ -67,6 +77,18 @@ class BatchItemView(BaseModel):
     failed_stage: str = ""
     error: str = ""
     videos: list[str] = Field(default_factory=list)
+
+
+class BatchView(BaseModel):
+    batch_id: str
+    created_at: datetime
+    updated_at: datetime
+    settings_summary: dict[str, Any]
+    items: list[BatchItemView]
+
+
+class BatchUploadRequiredError(ValueError):
+    pass
 
 
 def _safe_task_dir(tasks_root: Path, task_id: str) -> Path:
@@ -183,3 +205,140 @@ def derive_item_view(
         status=_processing_status(progress),
         progress=progress,
     )
+
+
+class BatchCoordinator:
+    def __init__(
+        self,
+        store: BatchStore | None = None,
+        tasks_root: str | Path | None = None,
+        state: Any = None,
+        submitter: Callable[..., None] | None = None,
+        process_owner: str = BATCH_PROCESS_OWNER,
+    ):
+        if state is None:
+            from app.services import state as state_module
+
+            state = state_module.state
+        if submitter is None:
+            from app.services import webui_task
+
+            submitter = webui_task.submit_generations
+        self.store = store or BatchStore()
+        self.tasks_root = Path(tasks_root or utils.task_dir())
+        self.state = state
+        self.submitter = submitter
+        self.process_owner = process_owner
+
+    @staticmethod
+    def _task_params(base_params: VideoParams, keyword: str) -> VideoParams:
+        params = base_params.model_copy(deep=True)
+        params.video_subject = keyword
+        params.video_script = ""
+        params.video_script_prompt = build_knowledge_script_prompt(
+            base_params.video_script_prompt
+        )
+        return params
+
+    def create_and_submit(
+        self,
+        raw_keywords: str,
+        base_params: VideoParams,
+        capture_logs: bool = True,
+    ) -> BatchRecord:
+        keywords = parse_keywords(raw_keywords)
+        record = self.store.create(keywords, base_params)
+        entries: list[tuple[str, VideoParams]] = []
+        now = datetime.now(timezone.utc)
+        for item in record.items:
+            task_id = str(uuid4())
+            item.attempts.append(
+                BatchAttempt(
+                    task_id=task_id,
+                    created_at=now,
+                    process_owner=self.process_owner,
+                )
+            )
+            entries.append((task_id, self._task_params(base_params, item.keyword)))
+        record.updated_at = now
+        self.store.save(record)
+        try:
+            self.submitter(entries, capture_logs=capture_logs)
+        except Exception:
+            self.store.delete(record.batch_id)
+            raise
+        return record
+
+    def list_batch_views(
+        self,
+    ) -> tuple[list[BatchView], list[BatchLoadWarning]]:
+        records, warnings = self.store.list_records()
+        batches = []
+        for record in records:
+            views = []
+            for item in record.items:
+                task_id = item.attempts[-1].task_id if item.attempts else ""
+                runtime = self.state.get_task(task_id) if task_id else None
+                views.append(
+                    derive_item_view(
+                        record,
+                        item,
+                        runtime,
+                        self.tasks_root,
+                        self.process_owner,
+                    )
+                )
+            batches.append(
+                BatchView(
+                    batch_id=record.batch_id,
+                    created_at=record.created_at,
+                    updated_at=record.updated_at,
+                    settings_summary=record.settings_summary,
+                    items=views,
+                )
+            )
+        return batches, warnings
+
+    def retry_item(
+        self,
+        batch_id: str,
+        item_id: str,
+        capture_logs: bool = True,
+    ) -> BatchRecord:
+        record = self.store.load(batch_id)
+        item = next((value for value in record.items if value.item_id == item_id), None)
+        if item is None:
+            raise ValueError("batch item not found")
+        task_id = item.attempts[-1].task_id if item.attempts else ""
+        runtime = self.state.get_task(task_id) if task_id else None
+        view = derive_item_view(
+            record,
+            item,
+            runtime,
+            self.tasks_root,
+            self.process_owner,
+        )
+        if view.status not in {
+            BatchItemStatus.failed,
+            BatchItemStatus.interrupted,
+        }:
+            raise ValueError("only failed or interrupted batch items can be retried")
+
+        params = VideoParams.model_validate(record.params_snapshot)
+        params = self._task_params(params, item.keyword)
+        attempt = BatchAttempt(
+            task_id=str(uuid4()),
+            created_at=datetime.now(timezone.utc),
+            process_owner=self.process_owner,
+        )
+        item.attempts.append(attempt)
+        record.updated_at = attempt.created_at
+        self.store.save(record)
+        try:
+            self.submitter([(attempt.task_id, params)], capture_logs=capture_logs)
+        except Exception:
+            item.attempts.pop()
+            record.updated_at = datetime.now(timezone.utc)
+            self.store.save(record)
+            raise
+        return record

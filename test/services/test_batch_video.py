@@ -6,8 +6,10 @@ import pytest
 
 from app.models import const
 from app.models.schema import VideoParams
+from app.services.state import MemoryState
 from app.services.batch_store import BatchAttempt, BatchStore
 from app.services.batch_video import (
+    BatchCoordinator,
     build_knowledge_script_prompt,
     derive_item_view,
     parse_keywords,
@@ -122,3 +124,107 @@ def test_existing_final_video_and_script_win_over_stale_runtime_state(tmp_path):
     assert view.videos == [str(final_video.resolve())]
     assert view.script_summary == script
     assert view.script_length == len(script)
+
+
+def test_coordinator_creates_one_independent_task_per_keyword(tmp_path):
+    submitted = []
+
+    def submitter(entries, capture_logs=True):
+        submitted.extend(entries)
+
+    coordinator = BatchCoordinator(
+        store=BatchStore(tmp_path / "batches"),
+        tasks_root=tmp_path / "tasks",
+        state=MemoryState(),
+        submitter=submitter,
+        process_owner="owner-a",
+    )
+    base = VideoParams(video_subject="", video_script_prompt="语气温和")
+
+    record = coordinator.create_and_submit("自律\n复利", base, capture_logs=False)
+
+    assert [params.video_subject for _, params in submitted] == ["自律", "复利"]
+    assert len({task_id for task_id, _ in submitted}) == 2
+    assert all("700 至 900" in params.video_script_prompt for _, params in submitted)
+    assert base.video_subject == ""
+    assert base.video_script_prompt == "语气温和"
+    assert [len(item.attempts) for item in record.items] == [1, 1]
+    assert coordinator.store.load(record.batch_id) == record
+
+
+def test_coordinator_removes_new_record_when_atomic_submission_fails(tmp_path):
+    def reject(_entries, capture_logs=True):
+        raise ValueError("queue full")
+
+    coordinator = BatchCoordinator(
+        store=BatchStore(tmp_path / "batches"),
+        tasks_root=tmp_path / "tasks",
+        state=MemoryState(),
+        submitter=reject,
+        process_owner="owner-a",
+    )
+
+    with pytest.raises(ValueError, match="queue full"):
+        coordinator.create_and_submit("自律", VideoParams(video_subject=""))
+
+    records, warnings = coordinator.store.list_records()
+    assert records == []
+    assert warnings == []
+
+
+def test_retry_appends_attempt_and_preserves_old_task(tmp_path):
+    submitted = []
+
+    def submitter(entries, capture_logs=True):
+        submitted.extend(entries)
+
+    state = MemoryState()
+    coordinator = BatchCoordinator(
+        store=BatchStore(tmp_path / "batches"),
+        tasks_root=tmp_path / "tasks",
+        state=state,
+        submitter=submitter,
+        process_owner="owner-a",
+    )
+    record = coordinator.create_and_submit("沉没成本", VideoParams(video_subject=""))
+    old_task_id = record.items[0].attempts[-1].task_id
+    state.update_task(
+        old_task_id,
+        state=const.TASK_STATE_FAILED,
+        failed_stage="script",
+        error="model unavailable",
+    )
+
+    updated = coordinator.retry_item(record.batch_id, record.items[0].item_id)
+
+    attempts = updated.items[0].attempts
+    assert len(attempts) == 2
+    assert attempts[0].task_id == old_task_id
+    assert attempts[1].task_id != old_task_id
+    assert submitted[-1][1].video_subject == "沉没成本"
+
+
+def test_list_batch_views_marks_old_owner_as_interrupted(tmp_path):
+    state = MemoryState()
+    coordinator = BatchCoordinator(
+        store=BatchStore(tmp_path / "batches"),
+        tasks_root=tmp_path / "tasks",
+        state=state,
+        submitter=lambda entries, capture_logs=True: None,
+        process_owner="old-owner",
+    )
+    record = coordinator.create_and_submit("机会成本", VideoParams(video_subject=""))
+    task_id = record.items[0].attempts[-1].task_id
+    state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=50)
+
+    restarted = BatchCoordinator(
+        store=coordinator.store,
+        tasks_root=tmp_path / "tasks",
+        state=state,
+        submitter=lambda entries, capture_logs=True: None,
+        process_owner="new-owner",
+    )
+    batches, warnings = restarted.list_batch_views()
+
+    assert warnings == []
+    assert batches[0].items[0].status == "interrupted"
