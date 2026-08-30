@@ -356,6 +356,23 @@ class BatchCoordinator:
             created_at=datetime.now(timezone.utc),
             process_owner=self.process_owner,
         )
+        retry_task_dir = None
+        if record.settings_summary.get("requires_custom_audio"):
+            previous_dir = _safe_task_dir(self.tasks_root, task_id)
+            audio_sources = [
+                path
+                for path in previous_dir.glob("custom-audio.*")
+                if path.is_file() and path.resolve().parent == previous_dir
+            ]
+            if len(audio_sources) != 1:
+                raise BatchUploadRequiredError(
+                    "custom narration must be uploaded again before retrying"
+                )
+            retry_task_dir = _safe_task_dir(self.tasks_root, attempt.task_id)
+            retry_task_dir.mkdir(parents=True, exist_ok=False)
+            audio_target = retry_task_dir / audio_sources[0].name
+            shutil.copyfile(audio_sources[0], audio_target)
+            params.custom_audio_file = str(audio_target)
         item.attempts.append(attempt)
         record.updated_at = attempt.created_at
         self.store.save(record)
@@ -365,5 +382,10 @@ class BatchCoordinator:
             item.attempts.pop()
             record.updated_at = datetime.now(timezone.utc)
             self.store.save(record)
+            if (
+                retry_task_dir is not None
+                and retry_task_dir.parent == self.tasks_root.resolve()
+            ):
+                shutil.rmtree(retry_task_dir, ignore_errors=True)
             raise
         return record

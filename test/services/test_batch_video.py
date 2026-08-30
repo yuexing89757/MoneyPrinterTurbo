@@ -250,3 +250,38 @@ def test_coordinator_copies_uploaded_narration_into_each_task(tmp_path):
     assert len(set(task_audio_paths)) == 2
     assert all(path.read_bytes() == b"shared narration" for path in task_audio_paths)
     assert all(path.parent.parent == (tmp_path / "tasks").resolve() for path in task_audio_paths)
+
+
+def test_retry_reuses_the_previous_tasks_uploaded_narration(tmp_path):
+    narration = tmp_path / "voice.wav"
+    narration.write_bytes(b"retry narration")
+    submitted = []
+    state = MemoryState()
+    coordinator = BatchCoordinator(
+        store=BatchStore(tmp_path / "batches"),
+        tasks_root=tmp_path / "tasks",
+        state=state,
+        submitter=lambda entries, capture_logs=True: submitted.extend(entries),
+        process_owner="owner-a",
+    )
+    record = coordinator.create_and_submit(
+        "自律",
+        VideoParams(video_subject="", custom_audio_file=str(narration)),
+    )
+    old_task_id = record.items[0].attempts[-1].task_id
+    old_audio = Path(submitted[-1][1].custom_audio_file)
+    state.update_task(
+        old_task_id,
+        state=const.TASK_STATE_FAILED,
+        failed_stage="video",
+        error="composition failed",
+    )
+
+    updated = coordinator.retry_item(record.batch_id, record.items[0].item_id)
+
+    new_task_id = updated.items[0].attempts[-1].task_id
+    new_audio = Path(submitted[-1][1].custom_audio_file)
+    assert new_task_id != old_task_id
+    assert new_audio != old_audio
+    assert new_audio.parent.name == new_task_id
+    assert new_audio.read_bytes() == b"retry narration"
