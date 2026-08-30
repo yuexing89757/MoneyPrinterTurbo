@@ -1312,6 +1312,32 @@ class TestTaskService(unittest.TestCase):
             "RuntimeError: provider connection reset",
         )
 
+    def test_start_stops_at_checkpoint_after_current_stage_is_cancelled(self):
+        params = VideoParams(video_subject="Coffee")
+        state = MemoryState()
+        cancellation_checks = iter((False, True))
+
+        with (
+            patch.object(tm, "generate_script", return_value="generated script"),
+            patch.object(
+                tm,
+                "generate_terms",
+                side_effect=AssertionError("next stage must not start"),
+            ),
+            patch.object(tm.sm, "state", state),
+        ):
+            result = tm.start(
+                "cancel-after-script",
+                params,
+                should_cancel=lambda: next(cancellation_checks),
+            )
+
+        cancelled_task = state.get_task("cancel-after-script")
+        self.assertEqual(result, cancelled_task)
+        self.assertEqual(cancelled_task["state"], tm.const.TASK_STATE_FAILED)
+        self.assertEqual(cancelled_task["failed_stage"], "cancelled")
+        self.assertEqual(cancelled_task["error"], "batch cancelled")
+
     def test_start_generates_youtube_metadata_for_each_cross_post(self):
         """
         自动发布到 YouTube 时只生成一次元数据，但要把同一份字段传给每个

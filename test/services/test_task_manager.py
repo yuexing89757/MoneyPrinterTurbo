@@ -38,6 +38,29 @@ class TestInMemoryTaskManager(unittest.TestCase):
 
         self.assertEqual([manager.dequeue() for _ in range(3)], tasks)
 
+    def test_cancel_queued_tasks_removes_matches_and_preserves_remaining_order(self):
+        manager = InMemoryTaskManager(max_concurrent_tasks=0, max_queued_tasks=3)
+        tasks = [
+            {
+                "func": len,
+                "args": ([value],),
+                "kwargs": {"task_id": task_id},
+            }
+            for value, task_id in ((1, "batch-a"), (2, "other"), (3, "batch-b"))
+        ]
+        manager.add_tasks(tasks)
+
+        removed = manager.cancel_queued_tasks(
+            lambda task: task["kwargs"]["task_id"].startswith("batch-")
+        )
+
+        self.assertEqual(
+            [task["kwargs"]["task_id"] for task in removed],
+            ["batch-a", "batch-b"],
+        )
+        self.assertEqual(manager.dequeue()["kwargs"]["task_id"], "other")
+        self.assertTrue(manager.is_queue_empty())
+
     def test_queue_operations_preserve_task_payload(self):
         """内存队列应保持函数、位置参数和关键字参数，不得改变任务内容。"""
         manager = InMemoryTaskManager(max_concurrent_tasks=1, max_queued_tasks=2)

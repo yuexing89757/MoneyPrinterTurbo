@@ -7,6 +7,7 @@ from streamlit.testing.v1 import AppTest
 
 from app.config import config
 from app.services.batch_video import BatchItemStatus
+from webui import batch_page
 from webui.batch_page import filter_batch_items, status_value
 
 
@@ -41,6 +42,41 @@ def test_batch_status_filter_accepts_typed_status_values():
 
     assert filter_batch_items([item], "complete") == [item]
     assert status_value(item.status) == "complete"
+
+
+def test_completed_batch_history_does_not_need_refresh():
+    batches = [SimpleNamespace(items=[SimpleNamespace(status="complete")])]
+    needs_refresh = getattr(
+        batch_page,
+        "batch_history_needs_refresh",
+        lambda _batches: True,
+    )
+
+    assert needs_refresh(batches) is False
+
+
+def test_processing_batch_history_needs_refresh():
+    batches = [SimpleNamespace(items=[SimpleNamespace(status="video")])]
+    needs_refresh = getattr(
+        batch_page,
+        "batch_history_needs_refresh",
+        lambda _batches: False,
+    )
+
+    assert needs_refresh(batches) is True
+
+
+def test_video_download_reader_does_not_read_until_invoked(tmp_path):
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"initial")
+    reader_factory = getattr(batch_page, "video_download_reader", None)
+
+    assert reader_factory is not None
+    reader = reader_factory(video_file)
+    video_file.write_bytes(b"updated")
+
+    assert callable(reader)
+    assert reader() == b"updated"
 
 
 def test_batch_module_never_calls_media_pipeline_directly():
@@ -87,3 +123,82 @@ def test_batch_mode_saves_runtime_config_before_returning():
         generation_mode.select("Batch Generation").run()
 
     save_config.assert_called_once_with()
+
+
+def test_completed_batch_item_only_renders_video_download(tmp_path):
+    video_file = tmp_path / "preview.mp4"
+    video_file.write_bytes(b"preview")
+    app = AppTest.from_string(
+        f"""
+from datetime import datetime
+
+from app.services.batch_video import BatchItemStatus, BatchItemView, BatchView
+from webui.batch_page import render_batch_table
+
+item = BatchItemView(
+    item_id="item-1",
+    task_id="task-1",
+    position=1,
+    keyword="preview",
+    status=BatchItemStatus.complete,
+    progress=100,
+    videos=[{str(video_file)!r}],
+)
+batch = BatchView(
+    batch_id="batch-1",
+    created_at=datetime.now(),
+    updated_at=datetime.now(),
+    settings_summary={{}},
+    items=[item],
+)
+render_batch_table(batch, lambda value: value, None, lambda *args: "preview.mp4", "all")
+"""
+    ).run()
+
+    assert not app.exception
+    assert len(app.get("video")) == 0
+    assert len(app.get("download_button")) == 1
+
+
+def test_active_batch_renders_cancel_button_that_cancels_selected_batch():
+    app = AppTest.from_string(
+        """
+from datetime import datetime
+import streamlit as st
+
+from app.services.batch_video import BatchItemStatus, BatchItemView, BatchView
+from webui.batch_page import _render_batch_history_contents
+
+class Coordinator:
+    def cancel_batch(self, batch_id):
+        st.session_state["cancelled_batch"] = batch_id
+        return 1
+
+item = BatchItemView(
+    item_id="item-1",
+    task_id="task-1",
+    position=1,
+    keyword="active",
+    status=BatchItemStatus.waiting,
+    progress=0,
+)
+batch = BatchView(
+    batch_id="batch-1",
+    created_at=datetime.now(),
+    updated_at=datetime.now(),
+    settings_summary={},
+    items=[item],
+)
+_render_batch_history_contents(
+    [batch], [], lambda value: value, Coordinator(), lambda *args: "video.mp4"
+)
+"""
+    ).run()
+
+    cancel_button = next(
+        button for button in app.button if button.key == "cancel_batch_batch-1"
+    )
+    cancel_button.click().run()
+
+    assert not app.exception
+    assert app.session_state["cancelled_batch"] == "batch-1"

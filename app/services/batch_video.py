@@ -198,8 +198,11 @@ def derive_item_view(
     state = runtime.get("state")
     published_videos = (
         videos
-        if state == const.TASK_STATE_COMPLETE
-        or attempt.process_owner != current_process_owner
+        if attempt.cancelled_at is None
+        and (
+            state == const.TASK_STATE_COMPLETE
+            or attempt.process_owner != current_process_owner
+        )
         else []
     )
     common = {
@@ -211,6 +214,12 @@ def derive_item_view(
         "script_length": len(script),
         "videos": published_videos,
     }
+    if attempt.cancelled_at is not None:
+        return BatchItemView(
+            **common,
+            status=BatchItemStatus.interrupted,
+            progress=max(0, min(100, int(runtime.get("progress", 0) or 0))),
+        )
     if published_videos:
         return BatchItemView(
             **common,
@@ -254,6 +263,7 @@ class BatchCoordinator:
         tasks_root: str | Path | None = None,
         state: Any = None,
         submitter: Callable[..., None] | None = None,
+        canceller: Callable[[list[str]], list[str]] | None = None,
         process_owner: str = BATCH_PROCESS_OWNER,
     ):
         if state is None:
@@ -264,10 +274,15 @@ class BatchCoordinator:
             from app.services import webui_task
 
             submitter = webui_task.submit_generations
+        if canceller is None:
+            from app.services import webui_task
+
+            canceller = webui_task.cancel_generations
         self.store = store or BatchStore()
         self.tasks_root = Path(tasks_root or utils.task_dir())
         self.state = state
         self.submitter = submitter
+        self.canceller = canceller
         self.process_owner = process_owner
 
     @staticmethod
@@ -428,3 +443,42 @@ class BatchCoordinator:
                 shutil.rmtree(retry_task_dir, ignore_errors=True)
             raise
         return record
+
+    def cancel_batch(self, batch_id: str) -> int:
+        record = self.store.load(batch_id)
+        task_ids = []
+        attempts_by_task_id = {}
+        for item in record.items:
+            if not item.attempts:
+                continue
+            attempt = item.attempts[-1]
+            runtime = self.state.get_task(attempt.task_id)
+            view = derive_item_view(
+                record,
+                item,
+                runtime,
+                self.tasks_root,
+                self.process_owner,
+            )
+            if view.status in {
+                BatchItemStatus.waiting,
+                BatchItemStatus.script,
+                BatchItemStatus.audio,
+                BatchItemStatus.materials,
+                BatchItemStatus.video,
+            }:
+                task_ids.append(attempt.task_id)
+                attempts_by_task_id[attempt.task_id] = attempt
+
+        cancelled_ids = set(self.canceller(task_ids))
+        if not cancelled_ids:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        for task_id in cancelled_ids:
+            attempt = attempts_by_task_id.get(task_id)
+            if attempt is not None:
+                attempt.cancelled_at = now
+        record.updated_at = now
+        self.store.save(record)
+        return len(cancelled_ids & attempts_by_task_id.keys())

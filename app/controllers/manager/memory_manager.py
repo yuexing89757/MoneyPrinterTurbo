@@ -1,5 +1,6 @@
-from queue import Queue
-from typing import Dict
+from collections.abc import Callable
+from queue import Empty, Queue
+from typing import Any, Dict
 
 from app.controllers.manager.base_manager import TaskManager
 
@@ -19,3 +20,23 @@ class InMemoryTaskManager(TaskManager):
 
     def queue_size(self):
         return self.queue.qsize()
+
+    def cancel_queued_tasks(
+        self, predicate: Callable[[Dict[str, Any]], bool]
+    ) -> list[Dict[str, Any]]:
+        removed = []
+        remaining = []
+        with self.lock:
+            while True:
+                try:
+                    task = self.queue.get_nowait()
+                except Empty:
+                    break
+                self.queue.task_done()
+                if predicate(task):
+                    removed.append(task)
+                else:
+                    remaining.append(task)
+            for task in remaining:
+                self.enqueue(task)
+        return removed

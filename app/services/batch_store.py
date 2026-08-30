@@ -19,6 +19,7 @@ class BatchAttempt(BaseModel):
     task_id: str
     created_at: datetime
     process_owner: str
+    cancelled_at: datetime | None = None
 
 
 class BatchItem(BaseModel):

@@ -248,6 +248,47 @@ def test_retry_appends_attempt_and_preserves_old_task(tmp_path):
     assert submitted[-1][1].video_subject == "沉没成本"
 
 
+def test_cancel_batch_only_interrupts_its_active_items_and_persists_marker(tmp_path):
+    cancelled_requests = []
+
+    def cancel_tasks(task_ids):
+        cancelled_requests.append(list(task_ids))
+        return list(task_ids)
+
+    state = MemoryState()
+    coordinator = BatchCoordinator(
+        store=BatchStore(tmp_path / "batches"),
+        tasks_root=tmp_path / "tasks",
+        state=state,
+        submitter=lambda entries, capture_logs=True: None,
+        canceller=cancel_tasks,
+        process_owner="owner-a",
+    )
+    record = coordinator.create_and_submit(
+        "已经失败\n仍在排队",
+        VideoParams(video_subject=""),
+    )
+    failed_task_id = record.items[0].attempts[-1].task_id
+    queued_task_id = record.items[1].attempts[-1].task_id
+    state.update_task(
+        failed_task_id,
+        state=const.TASK_STATE_FAILED,
+        failed_stage="script",
+        error="model unavailable",
+    )
+
+    cancelled_count = coordinator.cancel_batch(record.batch_id)
+
+    assert cancelled_count == 1
+    assert cancelled_requests == [[queued_task_id]]
+    saved = coordinator.store.load(record.batch_id)
+    assert saved.items[0].attempts[-1].cancelled_at is None
+    assert saved.items[1].attempts[-1].cancelled_at is not None
+    batches, warnings = coordinator.list_batch_views()
+    assert warnings == []
+    assert [item.status for item in batches[0].items] == ["failed", "interrupted"]
+
+
 def test_list_batch_views_marks_old_owner_as_interrupted(tmp_path):
     state = MemoryState()
     coordinator = BatchCoordinator(

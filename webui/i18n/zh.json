@@ -18,6 +18,7 @@
     "Batch Keyword Count": "共 {count} 个有效关键词",
     "Video Script Prompt": "额外文案风格要求（可选）",
     "Start Batch Generation": "开始批量生成",
+    "Cancel Batch": "取消该批次",
     "Batch Submitted": "已提交 {count} 个视频任务",
     "Batch Video Source Unsupported": "当前视频来源暂不支持批量生成",
     "Batch Video Source Key Required": "请先配置当前视频来源所需的 API Key",

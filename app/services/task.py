@@ -4,6 +4,7 @@ import re
 import socket
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from functools import partial
 from os import path
@@ -283,6 +284,14 @@ def _mark_task_failed(
         **failure_details,
     )
     return failure
+
+
+def _cancel_at_checkpoint(
+    task_id: str, should_cancel: Callable[[], bool] | None
+) -> dict | None:
+    if callable(should_cancel) and should_cancel():
+        return _mark_task_failed(task_id, "cancelled", "batch cancelled")
+    return None
 
 
 def generate_script(task_id, params):
@@ -1246,9 +1255,12 @@ def _run_pipeline(
     voice_preview: dict | None = None,
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
     allow_server_file_input: bool = False,
+    should_cancel: Callable[[], bool] | None = None,
 ):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
+    if cancellation := _cancel_at_checkpoint(task_id, should_cancel):
+        return cancellation
 
     if (
         stop_at in {"materials", "video"}
@@ -1314,6 +1326,8 @@ def _run_pipeline(
 
     # 1. Generate script
     video_script = generate_script(task_id, params)
+    if cancellation := _cancel_at_checkpoint(task_id, should_cancel):
+        return cancellation
     if not video_script or "Error: " in video_script:
         error = (
             video_script.removeprefix("Error: ").strip()
@@ -1334,6 +1348,8 @@ def _run_pipeline(
     video_terms = ""
     if params.video_source != "local":
         video_terms = generate_terms(task_id, params, video_script)
+        if cancellation := _cancel_at_checkpoint(task_id, should_cancel):
+            return cancellation
         if not video_terms:
             return _mark_task_failed(
                 task_id,
@@ -1359,6 +1375,8 @@ def _run_pipeline(
         voice_preview=voice_preview,
         allow_server_file_input=allow_server_file_input,
     )
+    if cancellation := _cancel_at_checkpoint(task_id, should_cancel):
+        return cancellation
     if not audio_file:
         return _mark_task_failed(
             task_id,
@@ -1381,6 +1399,8 @@ def _run_pipeline(
     subtitle_path = generate_subtitle(
         task_id, params, video_script, sub_maker, audio_file
     )
+    if cancellation := _cancel_at_checkpoint(task_id, should_cancel):
+        return cancellation
 
     if stop_at == "subtitle":
         sm.state.update_task(
@@ -1401,6 +1421,8 @@ def _run_pipeline(
         audio_duration,
         loomloom_video_request=loomloom_video_request,
     )
+    if cancellation := _cancel_at_checkpoint(task_id, should_cancel):
+        return cancellation
     if not downloaded_videos:
         return _mark_task_failed(
             task_id,
@@ -1435,6 +1457,8 @@ def _run_pipeline(
             audio_duration,
         )
     )
+    if cancellation := _cancel_at_checkpoint(task_id, should_cancel):
+        return cancellation
 
     if not final_video_paths:
         return _mark_task_failed(
@@ -1510,6 +1534,7 @@ def start(
     voice_preview: dict | None = None,
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
     allow_server_file_input: bool = False,
+    should_cancel: Callable[[], bool] | None = None,
 ):
     """
     执行任务流水线，并确保未预期异常也会转换成可查询的失败状态。
@@ -1525,6 +1550,7 @@ def start(
             voice_preview=voice_preview,
             loomloom_video_request=loomloom_video_request,
             allow_server_file_input=allow_server_file_input,
+            should_cancel=should_cancel,
         )
     except Exception as exc:
         logger.exception(

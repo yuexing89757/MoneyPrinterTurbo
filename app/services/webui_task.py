@@ -22,6 +22,8 @@ _task_manager = InMemoryTaskManager(
 )
 _task_logs: dict[str, deque[str]] = {}
 _task_logs_lock = threading.RLock()
+_generation_cancel_events: dict[str, threading.Event] = {}
+_generation_cancel_lock = threading.RLock()
 _MAX_LOG_TASKS = 20
 _MAX_LOG_RECORDS_PER_TASK = 1000
 # Streamlit 无法由后台线程直接推送组件更新，只能通过 Fragment 轮询。0.5 秒
@@ -56,6 +58,7 @@ def _run_generation(
     capture_logs: bool,
     voice_preview: dict | None = None,
     loomloom_video_request: LoomLoomConfirmedVideoRequest | None = None,
+    should_cancel=None,
 ) -> dict:
     """
     在后台线程中执行现有视频流水线。
@@ -84,6 +87,7 @@ def _run_generation(
                 params=params,
                 voice_preview=voice_preview,
                 loomloom_video_request=loomloom_video_request,
+                should_cancel=should_cancel,
             )
     except Exception as exc:
         # tm.start 已负责把流水线异常转换成失败状态；这里额外保护日志 sink、
@@ -110,6 +114,8 @@ def _run_generation(
         )
         return failure
     finally:
+        with _generation_cancel_lock:
+            _generation_cancel_events.pop(task_id, None)
         if log_handler_id is not None:
             try:
                 logger.remove(log_handler_id)
@@ -187,6 +193,10 @@ def submit_generations(
             video_subject=params.video_subject or params.video_script or task_id,
         )
 
+    cancel_events = {task_id: threading.Event() for task_id, _ in prepared}
+    with _generation_cancel_lock:
+        _generation_cancel_events.update(cancel_events)
+
     tasks = [
         {
             "func": _run_generation,
@@ -197,6 +207,7 @@ def submit_generations(
                 "capture_logs": capture_logs,
                 "voice_preview": None,
                 "loomloom_video_request": None,
+                "should_cancel": cancel_events[task_id].is_set,
             },
         }
         for task_id, params in prepared
@@ -204,8 +215,47 @@ def submit_generations(
     try:
         _task_manager.add_tasks(tasks)
     except Exception:
+        with _generation_cancel_lock:
+            for task_id, _ in prepared:
+                _generation_cancel_events.pop(task_id, None)
         delete_task = getattr(sm.state, "delete_task", None)
         if callable(delete_task):
             for task_id, _ in prepared:
                 delete_task(task_id)
         raise
+
+
+def cancel_generations(task_ids: list[str]) -> list[str]:
+    requested = list(dict.fromkeys(task_ids))
+    accepted = []
+    with _generation_cancel_lock:
+        for task_id in requested:
+            runtime = sm.state.get_task(task_id)
+            event = _generation_cancel_events.get(task_id)
+            if (
+                event is None
+                or not runtime
+                or runtime.get("state") != const.TASK_STATE_PROCESSING
+            ):
+                continue
+            event.set()
+            accepted.append(task_id)
+
+    accepted_ids = set(accepted)
+    removed = _task_manager.cancel_queued_tasks(
+        lambda task: task.get("kwargs", {}).get("task_id") in accepted_ids
+    )
+    removed_ids = {
+        task.get("kwargs", {}).get("task_id") for task in removed
+    }
+    for task_id in removed_ids:
+        sm.state.patch_task(
+            task_id,
+            state=const.TASK_STATE_FAILED,
+            failed_stage="cancelled",
+            error="batch cancelled",
+        )
+    with _generation_cancel_lock:
+        for task_id in removed_ids:
+            _generation_cancel_events.pop(task_id, None)
+    return accepted

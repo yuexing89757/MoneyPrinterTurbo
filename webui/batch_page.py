@@ -2,6 +2,7 @@ import mimetypes
 import os
 from collections.abc import Callable, Iterable
 from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 
@@ -27,6 +28,18 @@ def filter_batch_items(
             item for item in values if status_value(item.status) in PROCESSING_STATUSES
         ]
     return [item for item in values if status_value(item.status) == status_filter]
+
+
+def batch_history_needs_refresh(batches: Iterable[BatchView]) -> bool:
+    return any(
+        status_value(item.status) in PROCESSING_STATUSES
+        for batch in batches
+        for item in batch.items
+    )
+
+
+def video_download_reader(video_path: str | os.PathLike[str]) -> Callable[[], bytes]:
+    return Path(video_path).read_bytes
 
 
 def render_keyword_input(tr: Callable[[str], str]) -> str:
@@ -89,31 +102,29 @@ def render_batch_table(
                 for index, video_path in enumerate(item.videos, start=1):
                     if not os.path.isfile(video_path):
                         continue
-                    st.video(video_path)
-                    with open(video_path, "rb") as video_file:
-                        st.download_button(
-                            tr("Download Video"),
-                            data=video_file,
-                            file_name=download_name_builder(
-                                item.keyword,
-                                index,
-                                len(item.videos),
-                            ),
-                            mime=mimetypes.guess_type(video_path)[0] or "video/mp4",
-                            key=f"batch_download_{item.task_id}_{index}",
-                            icon=":material/download:",
-                            on_click="ignore",
-                            use_container_width=True,
-                        )
+                    st.download_button(
+                        tr("Download Video"),
+                        data=video_download_reader(video_path),
+                        file_name=download_name_builder(
+                            item.keyword,
+                            index,
+                            len(item.videos),
+                        ),
+                        mime=mimetypes.guess_type(video_path)[0] or "video/mp4",
+                        key=f"batch_download_{item.task_id}_{index}",
+                        icon=":material/download:",
+                        on_click="ignore",
+                        use_container_width=True,
+                    )
 
 
-@st.fragment(run_every=1.0)
-def render_batch_history(
-    coordinator: BatchCoordinator,
+def _render_batch_history_contents(
+    batches: list[BatchView],
+    warnings,
     tr: Callable[[str], str],
+    coordinator: BatchCoordinator,
     download_name_builder: Callable[[str, int, int], str],
 ) -> None:
-    batches, warnings = coordinator.list_batch_views()
     for warning in warnings:
         st.warning(
             tr("Batch Record Load Warning").format(filename=warning.filename)
@@ -137,10 +148,59 @@ def render_batch_history(
         format_func=lambda value: tr(f"Batch Filter {value.title()}"),
         key="batch_status_filter",
     )
+    selected_batch = batch_by_id[selected_id]
+    if batch_history_needs_refresh([selected_batch]) and st.button(
+        tr("Cancel Batch"),
+        key=f"cancel_batch_{selected_id}",
+        icon=":material/cancel:",
+        use_container_width=True,
+    ):
+        coordinator.cancel_batch(selected_id)
+        st.rerun()
     render_batch_table(
-        batch_by_id[selected_id],
+        selected_batch,
         tr,
         coordinator,
         download_name_builder,
         filter_value,
+    )
+
+
+@st.fragment(run_every=1.0)
+def _render_live_batch_history(
+    coordinator: BatchCoordinator,
+    tr: Callable[[str], str],
+    download_name_builder: Callable[[str, int, int], str],
+) -> None:
+    batches, warnings = coordinator.list_batch_views()
+    _render_batch_history_contents(
+        batches,
+        warnings,
+        tr,
+        coordinator,
+        download_name_builder,
+    )
+    if not batch_history_needs_refresh(batches):
+        st.rerun()
+
+
+def render_batch_history(
+    coordinator: BatchCoordinator,
+    tr: Callable[[str], str],
+    download_name_builder: Callable[[str, int, int], str],
+) -> None:
+    batches, warnings = coordinator.list_batch_views()
+    if batch_history_needs_refresh(batches):
+        _render_live_batch_history(
+            coordinator,
+            tr,
+            download_name_builder,
+        )
+        return
+    _render_batch_history_contents(
+        batches,
+        warnings,
+        tr,
+        coordinator,
+        download_name_builder,
     )

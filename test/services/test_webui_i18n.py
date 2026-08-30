@@ -31,6 +31,7 @@ ENGLISH_FALLBACK_KEYS = frozenset(
         "Batch Keyword Count",
         "Video Script Prompt",
         "Start Batch Generation",
+        "Cancel Batch",
         "Batch Submitted",
         "Batch Video Source Unsupported",
         "Batch Video Source Key Required",

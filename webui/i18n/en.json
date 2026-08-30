@@ -18,6 +18,7 @@
     "Batch Keyword Count": "{count} valid keywords",
     "Video Script Prompt": "Additional script style requirements (optional)",
     "Start Batch Generation": "Start Batch Generation",
+    "Cancel Batch": "Cancel this batch",
     "Batch Submitted": "Submitted {count} video tasks",
     "Batch Video Source Unsupported": "This video source is not supported by batch generation",
     "Batch Video Source Key Required": "Configure the API key required by the selected video source",

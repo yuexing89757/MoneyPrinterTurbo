@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from loguru import logger
 
+from app.controllers.manager.memory_manager import InMemoryTaskManager
 from app.models import const
 from app.models.schema import VideoParams
 from app.services import webui_task
@@ -342,6 +343,73 @@ def test_submit_generations_removes_provisional_states_when_admission_fails():
 
     assert webui_task.sm.state.get_task("rejected-task-a") is None
     assert webui_task.sm.state.get_task("rejected-task-b") is None
+
+
+def test_cancel_generations_removes_queued_tasks_and_marks_them_cancelled():
+    manager = InMemoryTaskManager(max_concurrent_tasks=0, max_queued_tasks=2)
+    entries = [
+        ("cancel-batch-task", VideoParams(video_subject="自律")),
+        ("keep-other-task", VideoParams(video_subject="复利")),
+    ]
+    try:
+        with patch.object(webui_task, "_task_manager", manager):
+            webui_task.submit_generations(entries, capture_logs=False)
+            cancelled = webui_task.cancel_generations(["cancel-batch-task"])
+
+        assert cancelled == ["cancel-batch-task"]
+        cancelled_state = webui_task.sm.state.get_task("cancel-batch-task")
+        assert cancelled_state["state"] == const.TASK_STATE_FAILED
+        assert cancelled_state["failed_stage"] == "cancelled"
+        assert webui_task.sm.state.get_task("keep-other-task")["state"] == (
+            const.TASK_STATE_PROCESSING
+        )
+        assert manager.dequeue()["kwargs"]["task_id"] == "keep-other-task"
+        assert manager.is_queue_empty()
+    finally:
+        webui_task.sm.state.delete_task("cancel-batch-task")
+        webui_task.sm.state.delete_task("keep-other-task")
+
+
+def test_cancel_generations_signals_a_running_batch_task():
+    manager = InMemoryTaskManager(max_concurrent_tasks=1, max_queued_tasks=1)
+    started = threading.Event()
+    cancellation_seen = threading.Event()
+    finished = threading.Event()
+    task_id = "cancel-running-batch-task"
+
+    def cancellable_start(*, should_cancel, **_kwargs):
+        started.set()
+        try:
+            if should_cancel and started.wait(timeout=2):
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and not should_cancel():
+                    time.sleep(0.01)
+                if should_cancel():
+                    cancellation_seen.set()
+            return {}
+        finally:
+            finished.set()
+
+    try:
+        with (
+            patch.object(webui_task, "_task_manager", manager),
+            patch.object(webui_task.tm, "start", side_effect=cancellable_start),
+            patch.object(
+                webui_task.config,
+                "runtime_config_lock",
+                return_value=nullcontext(),
+            ),
+        ):
+            webui_task.submit_generations(
+                [(task_id, VideoParams(video_subject="自律"))],
+                capture_logs=False,
+            )
+            assert started.wait(timeout=2)
+            assert webui_task.cancel_generations([task_id]) == [task_id]
+            assert cancellation_seen.wait(timeout=2)
+            assert finished.wait(timeout=2)
+    finally:
+        webui_task.sm.state.delete_task(task_id)
 
 
 def test_scheduling_failure_is_saved_as_terminal_task_state():
