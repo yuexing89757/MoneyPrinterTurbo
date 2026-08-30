@@ -1,7 +1,11 @@
 import ast
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+from streamlit.testing.v1 import AppTest
+
+from app.config import config
 from app.services.batch_video import BatchItemStatus
 from webui.batch_page import filter_batch_items, status_value
 
@@ -65,3 +69,21 @@ def test_main_routes_to_batch_application():
     assert "_render_batch_application" in function_names
     assert "_render_batch_application" in calls
     assert "batch_page.render_batch_history" in calls
+
+
+def test_batch_mode_saves_runtime_config_before_returning():
+    app = AppTest.from_file(WEBUI_MAIN, default_timeout=60)
+    app.session_state["ui_language"] = "en"
+
+    with patch.object(config, "try_save_config", return_value=True) as save_config:
+        app.run()
+        save_config.reset_mock()
+
+        generation_mode = next(
+            item
+            for item in app.get("button_group")
+            if item.key == "generation_mode"
+        )
+        generation_mode.select("Batch Generation").run()
+
+    save_config.assert_called_once_with()

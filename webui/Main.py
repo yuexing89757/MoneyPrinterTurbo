@@ -6235,6 +6235,7 @@ def _render_application():
     )
     if generation_mode == "batch":
         _render_batch_application()
+        _save_runtime_config()
         return
 
     if _apply_pending_settings_preset():
