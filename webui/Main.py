@@ -4698,7 +4698,12 @@ def _render_elevenlabs_api_key_input(label_key):
     ).strip()
 
 
-def _render_background_music_settings(params, elevenlabs_api_key_rendered=False):
+def _render_background_music_settings(
+    params,
+    elevenlabs_api_key_rendered=False,
+    bgm_type_default=None,
+    bgm_type_widget_key="bgm_type_select",
+):
     """渲染背景音乐来源与音量设置，并返回本次待保存的上传文件。"""
     uploaded_bgm_file = None
     previous_bgm_type = st.session_state.get("last_rendered_bgm_type")
@@ -4713,12 +4718,16 @@ def _render_background_music_settings(params, elevenlabs_api_key_rendered=False)
     selected_bgm_type = stable_selectbox(
         tr("Background Music Source"),
         options=[value for _, value in bgm_options],
-        default_value=_saved_ui_choice(
-            "bgm_type",
-            [value for _, value in bgm_options],
-            "random",
+        default_value=(
+            bgm_type_default
+            if bgm_type_default is not None
+            else _saved_ui_choice(
+                "bgm_type",
+                [value for _, value in bgm_options],
+                "random",
+            )
         ),
-        key="bgm_type_select",
+        key=bgm_type_widget_key,
         format_func=lambda value: dict((v, label) for label, v in bgm_options)[value],
     )
     params.bgm_type = selected_bgm_type
@@ -4945,7 +4954,16 @@ def _render_background_music_settings(params, elevenlabs_api_key_rendered=False)
     return uploaded_bgm_file
 
 
-def _render_audio_settings(panel, params):
+def _render_audio_settings(
+    panel,
+    params,
+    bgm_type_default=None,
+    bgm_type_widget_key="bgm_type_select",
+    voice_volume_default=None,
+    voice_rate_default=None,
+    voice_volume_widget_key="voice_volume_select",
+    voice_rate_widget_key="voice_rate_select",
+):
     """渲染音频设置并返回上传音频与当前配音模式。"""
     with panel:
         with st.container(border=True):
@@ -5389,10 +5407,14 @@ def _render_audio_settings(panel, params):
                     params.voice_volume = stable_selectbox(
                         tr("Voiceover Volume"),
                         options=voice_volume_options,
-                        default_value=_saved_ui_choice(
-                            "voice_volume", voice_volume_options, 1.0
+                        default_value=(
+                            voice_volume_default
+                            if voice_volume_default is not None
+                            else _saved_ui_choice(
+                                "voice_volume", voice_volume_options, 1.0
+                            )
                         ),
-                        key="voice_volume_select",
+                        key=voice_volume_widget_key,
                         format_func=lambda value: f"{int(value * 100)}%",
                         help=tr("Voiceover Volume Help"),
                     )
@@ -5401,10 +5423,14 @@ def _render_audio_settings(panel, params):
                     params.voice_rate = stable_selectbox(
                         tr("Voiceover Speed"),
                         options=voice_rate_options,
-                        default_value=_saved_ui_choice(
-                            "voice_rate", voice_rate_options, 1.0
+                        default_value=(
+                            voice_rate_default
+                            if voice_rate_default is not None
+                            else _saved_ui_choice(
+                                "voice_rate", voice_rate_options, 1.0
+                            )
                         ),
-                        key="voice_rate_select",
+                        key=voice_rate_widget_key,
                         format_func=lambda value: f"{value:.1f}×",
                         help=tr("Voiceover Speed Help"),
                     )
@@ -5433,10 +5459,14 @@ def _render_audio_settings(panel, params):
                 params.voice_volume = stable_selectbox(
                     tr("Voiceover Volume"),
                     options=voice_volume_options,
-                    default_value=_saved_ui_choice(
-                        "voice_volume", voice_volume_options, 1.0
+                    default_value=(
+                        voice_volume_default
+                        if voice_volume_default is not None
+                        else _saved_ui_choice(
+                            "voice_volume", voice_volume_options, 1.0
+                        )
                     ),
-                    key="voice_volume_select",
+                    key=voice_volume_widget_key,
                     format_func=lambda value: f"{int(value * 100)}%",
                     help=tr("Voiceover Volume Help"),
                 )
@@ -5451,6 +5481,8 @@ def _render_audio_settings(panel, params):
             uploaded_bgm_file = _render_background_music_settings(
                 params,
                 elevenlabs_api_key_rendered=elevenlabs_api_key_rendered,
+                bgm_type_default=bgm_type_default,
+                bgm_type_widget_key=bgm_type_widget_key,
             )
     return uploaded_audio_file, uploaded_bgm_file, voice_mode
 
@@ -6161,7 +6193,14 @@ def _render_batch_application():
     params.paragraph_number = 1
     uploaded_files = _render_video_settings(panel[1], params)
     uploaded_audio_file, uploaded_bgm_file, voice_mode = _render_audio_settings(
-        panel[2], params
+        panel[2],
+        params,
+        bgm_type_default="random",
+        bgm_type_widget_key="batch_bgm_type_select",
+        voice_volume_default=1.0,
+        voice_rate_default=1.0,
+        voice_volume_widget_key="batch_voice_volume_select",
+        voice_rate_widget_key="batch_voice_rate_select",
     )
     _render_subtitle_settings(panel[3], params)
 

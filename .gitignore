@@ -2,6 +2,7 @@
 /config.toml
 /config.toml.bak
 /storage/
+/batchVideos/
 /.idea/
 /app/services/__pycache__
 /app/__pycache__/
@@ -43,3 +44,7 @@ htmlcov/
 /docs/superpowers
 .understand-anything
 .worktrees/
+/.pytest_cache/
+/.ruff_cache/
+/.project
+/my_config/moneyprinterturbo-keys.json

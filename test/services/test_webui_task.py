@@ -320,6 +320,10 @@ def test_submit_generations_registers_all_states_and_enqueues_once():
         ]
         assert queued[0]["kwargs"]["params"] == entries[0][1]
         assert queued[0]["kwargs"]["params"] is not entries[0][1]
+        assert [task["kwargs"]["batch_keyword"] for task in queued] == [
+            "自律",
+            "复利",
+        ]
         assert webui_task.sm.state.get_task("batch-task-a")["video_subject"] == "自律"
         assert webui_task.sm.state.get_task("batch-task-b")["video_subject"] == "复利"
     finally:
@@ -464,6 +468,75 @@ def test_worker_logs_are_available_without_streamlit_session_state():
         r"- unique background task log",
         records[0],
     )
+
+
+def test_batch_worker_copies_completed_videos_using_keyword_names(tmp_path):
+    """批量任务完成后应保留原视频，并按关键词复制到批量目录。"""
+    source_one = tmp_path / "final-1.mp4"
+    source_two = tmp_path / "final-2.mp4"
+    source_one.write_bytes(b"video-one")
+    source_two.write_bytes(b"video-two")
+    batch_dir = tmp_path / "batchVideos"
+
+    with (
+        patch.object(
+            webui_task.tm,
+            "start",
+            return_value={"videos": [str(source_one), str(source_two)]},
+        ),
+        patch.object(
+            webui_task.config,
+            "runtime_config_lock",
+            return_value=nullcontext(),
+        ),
+    ):
+        result = webui_task._run_generation(
+            "batch-copy-test",
+            VideoParams(video_subject="长期主义"),
+            capture_logs=False,
+            batch_keyword="长期主义",
+            batch_output_dir=batch_dir,
+        )
+
+    assert result["videos"] == [str(source_one), str(source_two)]
+    assert source_one.read_bytes() == b"video-one"
+    assert source_two.read_bytes() == b"video-two"
+    assert (batch_dir / "长期主义-1.mp4").read_bytes() == b"video-one"
+    assert (batch_dir / "长期主义-2.mp4").read_bytes() == b"video-two"
+
+
+def test_batch_video_filename_removes_windows_invalid_characters(tmp_path):
+    source = tmp_path / "final-1.mp4"
+    source.write_bytes(b"video")
+    batch_dir = tmp_path / "batchVideos"
+
+    webui_task._copy_batch_videos([str(source)], ' A: day / in * Shanghai? . ', batch_dir)
+
+    assert [path.name for path in batch_dir.iterdir()] == ["A day in Shanghai.mp4"]
+
+
+def test_batch_video_copy_does_not_overwrite_an_existing_keyword_file(tmp_path):
+    source = tmp_path / "final-1.mp4"
+    source.write_bytes(b"new-video")
+    batch_dir = tmp_path / "batchVideos"
+    batch_dir.mkdir()
+    existing = batch_dir / "复利.mp4"
+    existing.write_bytes(b"old-video")
+
+    webui_task._copy_batch_videos([str(source)], "复利", batch_dir)
+
+    assert existing.read_bytes() == b"old-video"
+    assert (batch_dir / "复利-2.mp4").read_bytes() == b"new-video"
+
+
+def test_batch_video_filename_avoids_windows_reserved_names(tmp_path):
+    source = tmp_path / "final-1.mp4"
+    source.write_bytes(b"video")
+    batch_dir = tmp_path / "batchVideos"
+
+    webui_task._copy_batch_videos([str(source)], "CON", batch_dir)
+
+    assert (batch_dir / "_CON.mp4").read_bytes() == b"video"
 
 
 def test_log_paths_stay_posix_style_on_every_platform():

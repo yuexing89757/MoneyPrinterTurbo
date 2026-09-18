@@ -1,5 +1,8 @@
+import re
+import shutil
 import threading
 from collections import deque
+from pathlib import Path
 
 from loguru import logger
 
@@ -10,6 +13,7 @@ from app.models.schema import VideoParams
 from app.services import state as sm
 from app.services import task as tm
 from app.services.loomloom import LoomLoomConfirmedVideoRequest
+from app.utils import utils
 from app.utils.logging_utils import format_log_record
 
 
@@ -29,6 +33,48 @@ _MAX_LOG_RECORDS_PER_TASK = 1000
 # Streamlit 无法由后台线程直接推送组件更新，只能通过 Fragment 轮询。0.5 秒
 # 足以让 WebUI 日志接近终端实时输出，又不会像高频刷新那样持续占用浏览器资源。
 TASK_LOG_REFRESH_INTERVAL_SECONDS = 0.5
+_BATCH_FILENAME_INVALID_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+
+
+def _safe_batch_video_stem(keyword: str) -> str:
+    stem = _BATCH_FILENAME_INVALID_PATTERN.sub(" ", str(keyword or ""))
+    stem = re.sub(r"\s+", " ", stem).strip(" .")[:80].rstrip(" .")
+    stem = stem or "video"
+    if stem.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+        stem = f"_{stem}"
+    return stem
+
+
+def _available_video_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    counter = 2
+    while True:
+        candidate = path.with_name(f"{path.stem}-{counter}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def _copy_batch_videos(
+    videos: list[str], keyword: str, output_dir: str | Path | None = None
+) -> None:
+    destination_dir = Path(output_dir or Path(utils.root_dir()) / "batchVideos")
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    total = len(videos)
+    stem = _safe_batch_video_stem(keyword)
+    for index, video in enumerate(videos, start=1):
+        suffix = f"-{index}" if total > 1 else ""
+        destination = _available_video_path(destination_dir / f"{stem}{suffix}.mp4")
+        shutil.copy2(video, destination)
 
 
 def _append_task_log(task_id: str, message: str) -> None:
@@ -59,6 +105,8 @@ def _run_generation(
     voice_preview: dict | None = None,
     loomloom_video_request: LoomLoomConfirmedVideoRequest | None = None,
     should_cancel=None,
+    batch_keyword: str | None = None,
+    batch_output_dir: str | Path | None = None,
 ) -> dict:
     """
     在后台线程中执行现有视频流水线。
@@ -82,13 +130,16 @@ def _run_generation(
         # 完整任务仍使用原来的配置锁，防止另一个 WebUI 会话在生成中途修改
         # Provider、密钥等进程级配置，造成同一条视频前后使用不同设置。
         with config.runtime_config_lock():
-            return tm.start(
+            result = tm.start(
                 task_id=task_id,
                 params=params,
                 voice_preview=voice_preview,
                 loomloom_video_request=loomloom_video_request,
                 should_cancel=should_cancel,
             )
+        if batch_keyword and result.get("videos"):
+            _copy_batch_videos(result["videos"], batch_keyword, batch_output_dir)
+        return result
     except Exception as exc:
         # tm.start 已负责把流水线异常转换成失败状态；这里额外保护日志 sink、
         # 配置锁等 WebUI 包装层。任何后台线程异常都必须留下终态，不能让任务
@@ -208,6 +259,7 @@ def submit_generations(
                 "voice_preview": None,
                 "loomloom_video_request": None,
                 "should_cancel": cancel_events[task_id].is_set,
+                "batch_keyword": params.video_subject or params.video_script or task_id,
             },
         }
         for task_id, params in prepared

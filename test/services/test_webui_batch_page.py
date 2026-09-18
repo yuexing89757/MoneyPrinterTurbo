@@ -16,6 +16,15 @@ WEBUI_MAIN = ROOT_DIR / "webui" / "Main.py"
 WEBUI_BATCH_PAGE = ROOT_DIR / "webui" / "batch_page.py"
 
 
+def _widget_by_key(elements, key):
+    return next(
+        item
+        for item in elements
+        if str(getattr(item, "key", "")) == key
+        or str(getattr(item, "key", "")).startswith(f"{key}_")
+    )
+
+
 def _attribute_name(node):
     names = []
     while isinstance(node, ast.Attribute):
@@ -123,6 +132,55 @@ def test_batch_mode_saves_runtime_config_before_returning():
         generation_mode.select("Batch Generation").run()
 
     save_config.assert_called_once_with()
+
+
+def test_batch_mode_defaults_background_music_source_to_random():
+    app = AppTest.from_file(WEBUI_MAIN, default_timeout=60)
+    app.session_state["ui_language"] = "en"
+    test_ui_config = dict(config.ui, language="en", bgm_type="custom")
+
+    with (
+        patch.object(config, "ui", test_ui_config),
+        patch.object(config, "try_save_config", return_value=True),
+    ):
+        app.run()
+        generation_mode = next(
+            item
+            for item in app.get("button_group")
+            if item.key == "generation_mode"
+        )
+        generation_mode.select("Batch Generation").run()
+
+    assert not app.exception
+    assert _widget_by_key(app.selectbox, "batch_bgm_type_select").value == "random"
+
+
+def test_batch_mode_defaults_voice_volume_and_speed_to_normal():
+    app = AppTest.from_file(WEBUI_MAIN, default_timeout=60)
+    app.session_state["ui_language"] = "en"
+    test_ui_config = dict(
+        config.ui,
+        language="en",
+        voice_mode="tts",
+        voice_volume=1.5,
+        voice_rate=1.2,
+    )
+
+    with (
+        patch.object(config, "ui", test_ui_config),
+        patch.object(config, "try_save_config", return_value=True),
+    ):
+        app.run()
+        generation_mode = next(
+            item
+            for item in app.get("button_group")
+            if item.key == "generation_mode"
+        )
+        generation_mode.select("Batch Generation").run()
+
+    assert not app.exception
+    assert _widget_by_key(app.selectbox, "batch_voice_volume_select").value == 1.0
+    assert _widget_by_key(app.selectbox, "batch_voice_rate_select").value == 1.0
 
 
 def test_completed_batch_item_only_renders_video_download(tmp_path):
